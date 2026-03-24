@@ -111,7 +111,7 @@ const ICAO_TO_IATA = {
 // Clean name → IATA for airlines WITHOUT ICAO code in raw data
 const NAME_TO_IATA = {
 	'Aer Lingus': 'EI', 'Air Algerie': 'AH', 'Air Arabia Maroc': '3O',
-	'Air Europa': 'UX', 'Air France': 'AF', 'Austrian Airlines': 'OS',
+	'Air Europa': 'UX', 'Air France': 'AF', 'Air Nostrum': 'YW', 'Austrian Airlines': 'OS',
 	'BA Euroflyer': 'BA', 'Binter Canarias': 'NT', 'British Airways': 'BA',
 	'British Cityflyer': 'BA', 'Brussels Airlines': 'SN', 'Chair Airlines': 'GM',
 	'Condor': 'DE', 'Corendon Airlines Europe': 'XR', 'Discover Airlines': '4Y',
@@ -160,6 +160,8 @@ function cleanAirline(raw) {
 	let cleanName;
 	if (upper === 'SCANDINAVIAN AIRLINES SYSTEM') {
 		cleanName = 'SAS';
+	} else if (upper === 'AIR NOSTRUM') {
+		cleanName = 'Iberia Air Nostrum';
 	}
 	// 6. Brand prefix matching (handles "EASYJET", "EASYJET EUROPE", "JET2.COM" etc.)
 	else {
