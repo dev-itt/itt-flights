@@ -102,11 +102,45 @@ function cleanCity(raw) {
 	return titleCase(name);
 }
 
+// ICAO (3-letter) → IATA (2-letter) for airlines with codes in raw AENA data
+const ICAO_TO_IATA = {
+	'RYR': 'FR', 'RUK': 'RK', 'EZY': 'U2', 'EJU': 'EC',
+	'TRA': 'HV', 'NAX': 'DY', 'IBK': 'DY', 'WZZ': 'W6',
+};
+
+// Clean name → IATA for airlines WITHOUT ICAO code in raw data
+const NAME_TO_IATA = {
+	'Aer Lingus': 'EI', 'Air Algerie': 'AH', 'Air Arabia Maroc': '3O',
+	'Air Europa': 'UX', 'Air France': 'AF', 'Austrian Airlines': 'OS',
+	'BA Euroflyer': 'BA', 'Binter Canarias': 'NT', 'British Airways': 'BA',
+	'British Cityflyer': 'BA', 'Brussels Airlines': 'SN', 'Chair Airlines': 'GM',
+	'Condor': 'DE', 'Corendon Airlines Europe': 'XR', 'Discover Airlines': '4Y',
+	'EasyJet': 'U2', 'EasyJet Europe': 'EC', 'Edelweiss Air': 'WK',
+	'Eurowings': 'EW', 'Finnair': 'AY', 'Iberia': 'IB',
+	'Iberia Air Nostrum': 'YW', 'Jet Time A/s': 'JO', 'Jet2': 'LS',
+	'Leav Aviation': 'LJ', 'Lot Polish': 'LO', 'Lufthansa': 'LH',
+	'Lufthansa City Airlines': 'VL', 'Luxair': 'LG', 'Marabu Airlines': 'DI',
+	'Norwegian': 'DY', 'Ryanair': 'FR', 'Ryanair Uk': 'RK', 'SAS': 'SK',
+	'Smartwings': 'QS', 'Sunclass Airlines': 'DK', 'Sundair': 'SR',
+	'Swiftair': 'WT', 'Swiss': 'LX', 'TUIfly': 'X3', 'Transavia': 'HV',
+	'Tui Airways': 'BY', 'Tui Fly Belgium': 'TB', 'Volotea': 'V7',
+	'Vueling Airlines': 'VY', 'Wizz Air Hungary': 'W6',
+};
+
+/**
+ * Clean an airline name and resolve its IATA code.
+ * @returns {{ name: string, iata: string }}
+ */
 function cleanAirline(raw) {
 	let name = raw;
 
-	// 1. Strip IATA code in parens: "RYANAIR (RYR)" → "RYANAIR"
-	name = name.replace(/\s*\([A-Z]{3}\)\s*$/, '');
+	// 1. Extract ICAO code from parens before stripping: "RYANAIR (RYR)" → icao=RYR
+	let icaoCode = null;
+	const icaoMatch = name.match(/\s*\(([A-Z]{3})\)\s*$/);
+	if (icaoMatch) {
+		icaoCode = icaoMatch[1];
+		name = name.replace(icaoMatch[0], '');
+	}
 
 	// 2. Strip everything from GMBH onwards (handles "GMBH, LANGENHAGEN" etc.)
 	name = name.replace(/[,\s]+GMBH\b.*/i, '');
@@ -123,27 +157,40 @@ function cleanAirline(raw) {
 
 	// 5. Full-name special cases
 	const upper = name.toUpperCase();
-	if (upper === 'SCANDINAVIAN AIRLINES SYSTEM') return 'SAS';
-
+	let cleanName;
+	if (upper === 'SCANDINAVIAN AIRLINES SYSTEM') {
+		cleanName = 'SAS';
+	}
 	// 6. Brand prefix matching (handles "EASYJET", "EASYJET EUROPE", "JET2.COM" etc.)
-	for (const [prefix, brand] of BRAND_PREFIX) {
-		if (upper === prefix || upper.startsWith(prefix + '.')) return brand;
-		if (upper.startsWith(prefix + ' ')) {
-			const rest = name.slice(prefix.length).trim();
-			return brand + ' ' + titleCase(rest);
+	else {
+		let matched = false;
+		for (const [prefix, brand] of BRAND_PREFIX) {
+			if (upper === prefix || upper.startsWith(prefix + '.')) { cleanName = brand; matched = true; break; }
+			if (upper.startsWith(prefix + ' ')) {
+				const rest = name.slice(prefix.length).trim();
+				cleanName = brand + ' ' + titleCase(rest);
+				matched = true;
+				break;
+			}
+		}
+		if (!matched) {
+			// 7. Title case with special tokens
+			cleanName = name
+				.toLowerCase()
+				.split(/\s+/)
+				.filter(Boolean)
+				.map((w) => {
+					if (['ba', 'sas'].includes(w)) return w.toUpperCase();
+					return w.charAt(0).toUpperCase() + w.slice(1);
+				})
+				.join(' ');
 		}
 	}
 
-	// 7. Title case with special tokens
-	return name
-		.toLowerCase()
-		.split(/\s+/)
-		.filter(Boolean)
-		.map((w) => {
-			if (['ba', 'sas'].includes(w)) return w.toUpperCase();
-			return w.charAt(0).toUpperCase() + w.slice(1);
-		})
-		.join(' ');
+	// 8. Resolve IATA: first try ICAO mapping, then name mapping
+	const iata = (icaoCode && ICAO_TO_IATA[icaoCode]) || NAME_TO_IATA[cleanName] || '';
+
+	return { name: cleanName, iata };
 }
 
 // --- HTML Parsing ---
@@ -204,12 +251,19 @@ async function runScraper(env) {
 
 	await env.AENA_DATA.put('latest_raw', JSON.stringify(results));
 
-	const allAirlines = new Set();
+	const allAirlinesMap = new Map(); // name → { name, iata }
 	const airports = results.destinations.map((d) => {
 		const cityClean = cleanCity(d.city);
 		const label = d.iata ? `${cityClean} (${d.iata})` : cityClean;
-		const airlines = [...new Set(d.airlines.map(cleanAirline))].sort();
-		airlines.forEach((a) => allAirlines.add(a));
+		// cleanAirline now returns { name, iata }
+		const rawAirlines = d.airlines.map(cleanAirline);
+		// Deduplicate by name (e.g., Norwegian IBK + NAX → one entry)
+		const deduped = new Map();
+		for (const a of rawAirlines) {
+			if (!deduped.has(a.name)) deduped.set(a.name, a);
+		}
+		const airlines = [...deduped.values()].sort((a, b) => a.name.localeCompare(b.name));
+		airlines.forEach((a) => allAirlinesMap.set(a.name, a));
 		return { label, iata: d.iata, country: d.country, airlines };
 	});
 	airports.sort((a, b) => a.label.localeCompare(b.label));
@@ -218,7 +272,7 @@ async function runScraper(env) {
 		updated: timestamp,
 		airport: 'PMI',
 		airports,
-		airlines: [...allAirlines].sort(),
+		airlines: [...allAirlinesMap.values()].sort((a, b) => a.name.localeCompare(b.name)),
 	};
 
 	await env.AENA_DATA.put('latest', JSON.stringify(clean));
